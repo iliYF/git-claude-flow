@@ -34,11 +34,6 @@
 #   git claude bugfix/fix-login
 #   git claude origin/feature/remote-branch
 #
-# Requirements:
-#   - bash 3.2+
-#   - git 2.5.0+ (minimum version with worktree support)
-#   - cc (Claude Code CLI alias, alias cc=claude)
-#
 # =============================================================================
 
 # Claude Code command name (change this variable to switch commands)
@@ -121,17 +116,6 @@ show_help() {
     echo "  Worktrees are created in the same parent directory as the main repo:"
     echo "  {repo-name}-{branch-name-sanitized}"
     echo "  (Special characters / . # in branch names are replaced with -)" 
-    echo ""
-    echo -e "${COLOR_BOLD}Requirements:${COLOR_RESET}"
-    echo "  - git 2.5.0+"
-    echo "  - ${CLAUDE_CMD} (Claude Code CLI, alias cc=claude)"
-    echo ""
-    echo -e "${COLOR_BOLD}Installation (recommended):${COLOR_RESET}"
-    echo "  # Place the script in your project (e.g. scripts/git-claude), configure git alias:"
-    echo "  git config alias.claude '!bash \"\$(git rev-parse --show-toplevel)/scripts/git-claude\"'"
-    echo ""
-    echo "  # Global alias (requires absolute path):"
-    echo "  git config --global alias.claude '!bash \"/path/to/scripts/git-claude\"'"
     echo ""
     echo -e "${COLOR_BOLD}Version:${COLOR_RESET} ${VERSION}"
 }
