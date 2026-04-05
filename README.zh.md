@@ -88,7 +88,7 @@ git claude clean
 git claude clean feature/my-feature
 
 # 显示帮助
-git claude --help
+git claude -h
 
 # 显示版本
 git claude --version

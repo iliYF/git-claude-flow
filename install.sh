@@ -39,17 +39,25 @@
 
 set -euo pipefail
 
+# Ensure running under bash (process substitution, [[ ]], etc. require bash)
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This script requires bash. Please run with: bash $0 $*" >&2
+    exit 1
+fi
+
 # =============================================================================
 # Configuration
 # =============================================================================
 
 SCRIPT_NAME="git-claude"
-SCRIPT_SOURCE_NAME="git-claude-flow"
+SCRIPT_SOURCE_NAME="git-claude-flow.sh"    # Source filename in repo (with .sh extension)
+SCRIPT_INSTALL_NAME="git-claude-flow"       # Installed filename (without .sh extension)
 GITHUB_REPO="iliYF/git-claude-flow"
 GITHUB_BRANCH="main"
 SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/scripts/${SCRIPT_SOURCE_NAME}"
 SYSTEM_INSTALL_DIR="/usr/local/bin"
 USER_INSTALL_DIR="${HOME}/.git-claude-flow"
+CONFIG_FILE="${USER_INSTALL_DIR}/config"   # Persistent config for system/user mode
 
 # User configuration (set via interactive prompts or CLI flags)
 GIT_ALIAS_NAME="claude"  # git alias name, default: claude
@@ -59,6 +67,7 @@ CLAUDE_CMD_NAME="claude" # Claude Code command name, default: claude
 _ALIAS_SET=false
 _CMD_SET=false
 _UNINSTALL=false
+_REINSTALL=false   # true = user chose to reinstall (skip existing-install check)
 
 # =============================================================================
 # Color output
@@ -158,6 +167,7 @@ get_script_content() {
     # Look for local file first: install.sh is in root, script is in scripts/ subdirectory
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/stdin}")" 2>/dev/null && pwd || echo "")"
+    # Look for source file with .sh extension in scripts/ subdirectory
     local local_script="${script_dir}/scripts/${SCRIPT_SOURCE_NAME}"
 
     if [[ -f "$local_script" ]]; then
@@ -292,7 +302,7 @@ ask_alias_name_for_uninstall() {
 }
 
 uninstall_system() {
-    local script_dest="${USER_INSTALL_DIR}/${SCRIPT_SOURCE_NAME}"
+    local script_dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
 
     # Step 1: Remove symlink(s) from /usr/local/bin/
     # Always remove git-claude (default symlink)
@@ -315,28 +325,30 @@ uninstall_system() {
         fi
     done
 
-    # Step 2: Remove script from ~/.git-claude-flow/
+    # Step 2: Remove script and config from ~/.git-claude-flow/
     if [[ -f "$script_dest" ]]; then
         info_msg "Removing script: ${script_dest}"
         rm -f "$script_dest" || die "Failed to remove ${script_dest}."
         info_success "Removed script: ${script_dest}"
-        rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
     else
         info_warn "Not found: ${script_dest} (already removed or never installed)"
     fi
+    remove_config
+    rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
 }
 
 uninstall_user() {
-    local dest="${USER_INSTALL_DIR}/${SCRIPT_SOURCE_NAME}"
+    local dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
     if [[ -f "$dest" ]]; then
         info_msg "Removing: ${dest}"
         rm -f "$dest" || die "Failed to remove ${dest}."
         info_success "Removed: ${dest}"
-        # Remove directory if empty
-        rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
     else
         info_warn "Not found: ${dest} (already removed or never installed)"
     fi
+    remove_config
+    # Remove directory if empty
+    rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
     # Remove global git alias (--global)
     if git config --global "alias.${GIT_ALIAS_NAME}" &>/dev/null; then
         info_msg "Removing global git alias: ${GIT_ALIAS_NAME}"
@@ -355,7 +367,7 @@ uninstall_local() {
 
     local repo_root
     repo_root=$(git rev-parse --show-toplevel)
-    local dest="${repo_root}/scripts/${SCRIPT_SOURCE_NAME}"
+    local dest="${repo_root}/scripts/${SCRIPT_INSTALL_NAME}"
 
     if [[ -f "$dest" ]]; then
         info_msg "Removing: ${dest}"
@@ -376,14 +388,182 @@ uninstall_local() {
 }
 
 # =============================================================================
-# Install: system mode
+# Config file management (persistent config for system/user mode)
 # =============================================================================
 
-install_system() {
-    local src="$1"
-    local script_dest="${USER_INSTALL_DIR}/${SCRIPT_SOURCE_NAME}"
+# Config file format (INI-like, one key=value per line):
+#   mode=user
+#   alias=claude
+#   cmd=claude
+#   version=1.0.0
+#   md5=abc123...
+#   installed_at=2025-01-01T12:00:00
 
-    # Step 1: Check for conflicts in /usr/local/bin/
+# Read a value from config file by key
+_config_get() {
+    local key="$1"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        grep -m1 "^${key}=" "$CONFIG_FILE" 2>/dev/null | sed "s/^${key}=//" || true
+    fi
+}
+
+# Save config file after installation (system/user mode only)
+save_config() {
+    # Only persist config for system/user mode; local mode is repo-specific
+    if [[ "$INSTALL_MODE" == "local" ]]; then
+        return 0
+    fi
+
+    local script_path="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
+    local script_version=""
+    local script_md5=""
+
+    # Extract version from installed script
+    if [[ -f "$script_path" ]]; then
+        script_version=$(grep -m1 '^VERSION=' "$script_path" 2>/dev/null | sed 's/^VERSION="\(.*\)"/\1/' || true)
+        # Calculate MD5 (compatible with macOS and Linux)
+        if command -v md5sum &>/dev/null; then
+            script_md5=$(md5sum "$script_path" | awk '{print $1}')
+        elif command -v md5 &>/dev/null; then
+            script_md5=$(md5 -q "$script_path")
+        fi
+    fi
+
+    mkdir -p "$USER_INSTALL_DIR"
+    cat > "$CONFIG_FILE" <<EOF
+mode=${INSTALL_MODE}
+alias=${GIT_ALIAS_NAME}
+cmd=${CLAUDE_CMD_NAME}
+version=${script_version}
+md5=${script_md5}
+installed_at=$(date -u '+%Y-%m-%dT%H:%M:%S')
+EOF
+    info_success "Config saved: ${CONFIG_FILE}"
+}
+
+# Remove config file (called during uninstall)
+remove_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        rm -f "$CONFIG_FILE"
+        info_success "Removed config: ${CONFIG_FILE}"
+    fi
+}
+
+# =============================================================================
+# Detect existing installation (called before interactive prompts)
+# =============================================================================
+
+# Check if already installed; if so, prompt user to reuse / reinstall / exit
+check_existing_installation() {
+    local installed_script=""
+    local existing_mode="" existing_alias="" existing_cmd=""
+    local existing_version="" existing_md5=""
+
+    case "$INSTALL_MODE" in
+        system|user)
+            installed_script="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
+            # Read from config file if available
+            if [[ -f "$CONFIG_FILE" ]]; then
+                existing_mode=$(_config_get "mode")
+                existing_alias=$(_config_get "alias")
+                existing_cmd=$(_config_get "cmd")
+                existing_version=$(_config_get "version")
+                existing_md5=$(_config_get "md5")
+            fi
+            ;;
+        local)
+            local repo_root
+            repo_root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+            if [[ -n "$repo_root" ]]; then
+                installed_script="${repo_root}/scripts/${SCRIPT_INSTALL_NAME}"
+            fi
+            # local mode: detect alias from git config (no persistent config)
+            if [[ -n "$installed_script" ]] && [[ -f "$installed_script" ]]; then
+                local _alias_output
+                _alias_output=$(git config --get-regexp '^alias\.' 2>/dev/null || true)
+                if [[ -n "$_alias_output" ]]; then
+                    local key value
+                    while read -r key value; do
+                        if [[ "$value" == *"git-claude-flow"* ]]; then
+                            existing_alias="${key#alias.}"
+                            break
+                        fi
+                    done <<< "$_alias_output"
+                fi
+                existing_cmd=$(grep -m1 '^CLAUDE_CMD=' "$installed_script" 2>/dev/null | sed 's/^CLAUDE_CMD="\(.*\)"/\1/' || true)
+                existing_version=$(grep -m1 '^VERSION=' "$installed_script" 2>/dev/null | sed 's/^VERSION="\(.*\)"/\1/' || true)
+            fi
+            ;;
+    esac
+
+    # No installed script found — fresh install
+    if [[ -z "$installed_script" ]] || [[ ! -f "$installed_script" ]]; then
+        return 0
+    fi
+
+    # Apply defaults
+    existing_alias="${existing_alias:-claude}"
+    existing_cmd="${existing_cmd:-claude}"
+    existing_version="${existing_version:-unknown}"
+
+    echo -e "${COLOR_YELLOW}════════════════════════════════════════════${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}  git-claude-flow is already installed (${INSTALL_MODE} mode)${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}════════════════════════════════════════════${COLOR_RESET}"
+    echo ""
+    echo -e "  Script:  ${COLOR_BOLD}${installed_script}${COLOR_RESET}"
+    echo -e "  Alias:   ${COLOR_BOLD}git ${existing_alias}${COLOR_RESET}"
+    echo -e "  Command: ${COLOR_BOLD}${existing_cmd}${COLOR_RESET}"
+    echo -e "  Version: ${COLOR_BOLD}${existing_version}${COLOR_RESET}"
+    if [[ -n "$existing_md5" ]]; then
+        echo -e "  MD5:     ${COLOR_BOLD}${existing_md5}${COLOR_RESET}"
+    fi
+    echo ""
+    echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}Reuse${COLOR_RESET}      — Keep current config, update script only"
+    echo -e "  ${COLOR_CYAN}[2]${COLOR_RESET} ${COLOR_BOLD}Reinstall${COLOR_RESET}  — Reconfigure alias, command, and reinstall"
+    echo -e "  ${COLOR_YELLOW}[0]${COLOR_RESET} Exit"
+    echo ""
+    printf "Enter number [0-2] (default: 1): "
+    local choice
+    read_tty choice
+    choice="${choice:-1}"
+    case "$choice" in
+        1)
+            # Reuse existing config: set alias & cmd, skip interactive prompts
+            GIT_ALIAS_NAME="$existing_alias"
+            CLAUDE_CMD_NAME="$existing_cmd"
+            _ALIAS_SET=true
+            _CMD_SET=true
+            info_success "Reusing existing config: git ${GIT_ALIAS_NAME}, cmd=${CLAUDE_CMD_NAME}"
+            ;;
+        2)
+            # Reinstall: continue with normal interactive flow
+            _REINSTALL=true
+            info_msg "Proceeding with fresh configuration..."
+            ;;
+        0)
+            info_msg "Installation cancelled."
+            exit 0
+            ;;
+        *)
+            die "Invalid option: ${choice}"
+            ;;
+    esac
+}
+
+# =============================================================================
+# Alias conflict detection (called before downloading script)
+# =============================================================================
+
+check_alias_conflict() {
+    case "$INSTALL_MODE" in
+        system) check_alias_conflict_system ;;
+        user)   check_alias_conflict_user   ;;
+        local)  check_alias_conflict_local  ;;
+    esac
+}
+
+# Check for conflicts in /usr/local/bin/ (system mode)
+check_alias_conflict_system() {
     while true; do
         local symlinks_to_create=("${SYSTEM_INSTALL_DIR}/git-claude")
         if [[ "$GIT_ALIAS_NAME" != "claude" ]]; then
@@ -411,17 +591,86 @@ install_system() {
             break
         fi
         echo ""
-        printf "${COLOR_YELLOW}Please enter a different alias name (or press Enter to abort): ${COLOR_RESET}"
+        printf "${COLOR_YELLOW}Alias '${GIT_ALIAS_NAME}' conflicts. Please enter a different alias name: ${COLOR_RESET}"
         local new_alias
         read_tty new_alias
-        if [[ -z "$new_alias" ]]; then
-            die "Installation aborted due to alias conflict."
-        fi
+        while [[ -z "$new_alias" ]]; do
+            printf "${COLOR_YELLOW}Alias name cannot be empty. Please enter a different alias name: ${COLOR_RESET}"
+            read_tty new_alias
+        done
         GIT_ALIAS_NAME="$new_alias"
         info_success "Using new alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
     done
+}
 
-    # Step 2: Install script to ~/.git-claude-flow/ (shared storage)
+# Check for global git alias conflict (user mode)
+check_alias_conflict_user() {
+    while true; do
+        local existing_alias
+        existing_alias=$(git config --global "alias.${GIT_ALIAS_NAME}" 2>/dev/null || true)
+        if [[ -z "$existing_alias" ]]; then
+            break
+        fi
+        if [[ "$existing_alias" == *"${USER_INSTALL_DIR}"* || "$existing_alias" == *"git-claude-flow"* ]]; then
+            info_warn "Global git alias '${GIT_ALIAS_NAME}' already set to our script (will overwrite): ${existing_alias}"
+            break
+        fi
+        info_warn "Conflict: global git alias '${GIT_ALIAS_NAME}' already exists with a different value:"
+        echo -e "  ${existing_alias}"
+        echo ""
+        printf "${COLOR_YELLOW}Alias '${GIT_ALIAS_NAME}' conflicts. Please enter a different alias name: ${COLOR_RESET}"
+        local new_alias
+        read_tty new_alias
+        while [[ -z "$new_alias" ]]; do
+            printf "${COLOR_YELLOW}Alias name cannot be empty. Please enter a different alias name: ${COLOR_RESET}"
+            read_tty new_alias
+        done
+        GIT_ALIAS_NAME="$new_alias"
+        info_success "Using new alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
+    done
+}
+
+# Check for repository-level git alias conflict (local mode)
+check_alias_conflict_local() {
+    # Check if inside a git repository first
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        die "Not a git repository. local mode must be run from a git repository root."
+    fi
+
+    while true; do
+        local existing_alias
+        existing_alias=$(git config "alias.${GIT_ALIAS_NAME}" 2>/dev/null || true)
+        if [[ -z "$existing_alias" ]]; then
+            break
+        fi
+        if [[ "$existing_alias" == *"${SCRIPT_INSTALL_NAME}"* || "$existing_alias" == *"git-claude-flow"* ]]; then
+            info_warn "Repository git alias '${GIT_ALIAS_NAME}' already set to our script (will overwrite): ${existing_alias}"
+            break
+        fi
+        info_warn "Conflict: repository git alias '${GIT_ALIAS_NAME}' already exists with a different value:"
+        echo -e "  ${existing_alias}"
+        echo ""
+        printf "${COLOR_YELLOW}Alias '${GIT_ALIAS_NAME}' conflicts. Please enter a different alias name: ${COLOR_RESET}"
+        local new_alias
+        read_tty new_alias
+        while [[ -z "$new_alias" ]]; do
+            printf "${COLOR_YELLOW}Alias name cannot be empty. Please enter a different alias name: ${COLOR_RESET}"
+            read_tty new_alias
+        done
+        GIT_ALIAS_NAME="$new_alias"
+        info_success "Using new alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
+    done
+}
+
+# =============================================================================
+# Install: system mode
+# =============================================================================
+
+install_system() {
+    local src="$1"
+    local script_dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
+
+    # Step 1: Install script to ~/.git-claude-flow/ (shared storage)
     mkdir -p "$USER_INSTALL_DIR"
     local tmp_patched
     tmp_patched=$(mktemp /tmp/git-claude-patched-XXXXXX)
@@ -448,6 +697,9 @@ install_system() {
     echo ""
     echo -e "  You can now use in any git repository: ${COLOR_BOLD}git ${GIT_ALIAS_NAME} <branch>${COLOR_RESET}"
     echo -e "  (Available to all users on this machine, no git config required)"
+
+    # Save config for future reuse
+    save_config
 }
 # =============================================================================
 # Install: user mode
@@ -455,31 +707,7 @@ install_system() {
 
 install_user() {
     local src="$1"
-    local dest="${USER_INSTALL_DIR}/${SCRIPT_SOURCE_NAME}"
-
-    # Check for global git alias conflict
-    while true; do
-        local existing_alias
-        existing_alias=$(git config --global "alias.${GIT_ALIAS_NAME}" 2>/dev/null || true)
-        if [[ -z "$existing_alias" ]]; then
-            break
-        fi
-        if [[ "$existing_alias" == *"${USER_INSTALL_DIR}"* || "$existing_alias" == *"git-claude-flow"* ]]; then
-            info_warn "Global git alias '${GIT_ALIAS_NAME}' already set to our script (will overwrite): ${existing_alias}"
-            break
-        fi
-        info_warn "Conflict: global git alias '${GIT_ALIAS_NAME}' already exists with a different value:"
-        echo -e "  ${existing_alias}"
-        echo ""
-        printf "${COLOR_YELLOW}Please enter a different alias name (or press Enter to abort): ${COLOR_RESET}"
-        local new_alias
-        read_tty new_alias
-        if [[ -z "$new_alias" ]]; then
-            die "Installation aborted due to alias conflict."
-        fi
-        GIT_ALIAS_NAME="$new_alias"
-        info_success "Using new alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
-    done
+    local dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
 
     mkdir -p "$USER_INSTALL_DIR"
     # Patch CLAUDE_CMD into the script
@@ -499,6 +727,9 @@ install_user() {
     echo ""
     echo -e "  You can now use in any git repository: ${COLOR_BOLD}git ${GIT_ALIAS_NAME} <branch>${COLOR_RESET}"
     echo -e "  (Available to current user only, no PATH change required)"
+
+    # Save config for future reuse
+    save_config
 }
 # =============================================================================
 # Install: local mode
@@ -507,49 +738,20 @@ install_user() {
 install_local() {
     local src="$1"
 
-    # Check if inside a git repository
-    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        die "Not a git repository. local mode must be run from a git repository root."
-    fi
-
     local repo_root
     repo_root=$(git rev-parse --show-toplevel)
     local scripts_dir="${repo_root}/scripts"
-    local dest="${scripts_dir}/${SCRIPT_SOURCE_NAME}"
-
-    # Check for repository-level git alias conflict
-    while true; do
-        local existing_alias
-        existing_alias=$(git config "alias.${GIT_ALIAS_NAME}" 2>/dev/null || true)
-        if [[ -z "$existing_alias" ]]; then
-            break
-        fi
-        if [[ "$existing_alias" == *"${SCRIPT_SOURCE_NAME}"* || "$existing_alias" == *"git-claude-flow"* ]]; then
-            info_warn "Repository git alias '${GIT_ALIAS_NAME}' already set to our script (will overwrite): ${existing_alias}"
-            break
-        fi
-        info_warn "Conflict: repository git alias '${GIT_ALIAS_NAME}' already exists with a different value:"
-        echo -e "  ${existing_alias}"
-        echo ""
-        printf "${COLOR_YELLOW}Please enter a different alias name (or press Enter to abort): ${COLOR_RESET}"
-        local new_alias
-        read_tty new_alias
-        if [[ -z "$new_alias" ]]; then
-            die "Installation aborted due to alias conflict."
-        fi
-        GIT_ALIAS_NAME="$new_alias"
-        info_success "Using new alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
-    done
+    local dest="${scripts_dir}/${SCRIPT_INSTALL_NAME}"
 
     mkdir -p "$scripts_dir"
-    # Patch CLAUDE_CMD into the script
+    # Patch CLAUDE_CMD and install: source is .sh, dest is without .sh (no conflict)
     sed "s|^CLAUDE_CMD=.*|CLAUDE_CMD=\"${CLAUDE_CMD_NAME}\"|" "$src" > "$dest"
     chmod 755 "$dest" || die "Failed to copy script."
-    info_success "Script copied to: ${dest}"
+    info_success "Script installed to: ${dest}"
 
     # Configure repository-level git alias
     info_msg "Configuring repository-level git alias: ${GIT_ALIAS_NAME}..."
-    git config "alias.${GIT_ALIAS_NAME}" "!bash \"\$(git rev-parse --show-toplevel)/scripts/${SCRIPT_SOURCE_NAME}\""
+    git config "alias.${GIT_ALIAS_NAME}" "!bash \"\$(git rev-parse --show-toplevel)/scripts/${SCRIPT_INSTALL_NAME}\""
     info_success "git alias configured: git ${GIT_ALIAS_NAME}"
 
     echo ""
@@ -558,7 +760,7 @@ install_local() {
     echo ""
     info_warn "Note: this alias only applies to the current repository (${repo_root})."
     echo "  For global access, choose system or user mode, or configure a global alias manually:"
-    echo -e "  ${COLOR_BOLD}git config --global alias.${GIT_ALIAS_NAME} '!bash \"/path/to/scripts/${SCRIPT_SOURCE_NAME}\"'${COLOR_RESET}"
+    echo -e "  ${COLOR_BOLD}git config --global alias.${GIT_ALIAS_NAME} '!bash \"/path/to/scripts/${SCRIPT_INSTALL_NAME}\"'${COLOR_RESET}"
 }
 # =============================================================================
 # Main
@@ -620,26 +822,32 @@ else
         select_mode
     fi
 
-    # Step 2: Prompt for git alias name (if not set via --alias flag)
-    if ! $_ALIAS_SET; then
-        ask_alias_name
-    fi
-
-    # Step 3: Prompt for Claude Code command name (if not set via --cmd flag)
-    if ! $_CMD_SET; then
-        ask_claude_cmd
-    fi
-
     # Validate mode
     case "$INSTALL_MODE" in
         system|user|local) ;;
         *) die "Invalid install mode: ${INSTALL_MODE}\n  Valid values: system | user | local" ;;
     esac
 
+    # Step 2: Check for existing installation (may set _ALIAS_SET/_CMD_SET if reusing)
+    check_existing_installation
+
+    # Step 3: Prompt for git alias name (if not set via --alias flag and not reusing)
+    if ! $_ALIAS_SET; then
+        ask_alias_name
+    fi
+
+    # Step 4: Prompt for Claude Code command name (if not set via --cmd flag and not reusing)
+    if ! $_CMD_SET; then
+        ask_claude_cmd
+    fi
+
     info_msg "Install mode: ${COLOR_BOLD}${INSTALL_MODE}${COLOR_RESET}"
     echo ""
 
-    # Get script file path
+    # Step 5: Check alias conflict (before downloading to avoid unnecessary network requests)
+    check_alias_conflict
+
+    # Step 6: Get script file path (download or read local)
     SCRIPT_FILE=$(get_script_content)
 
     # Run installer
@@ -654,7 +862,7 @@ else
     echo -e "${COLOR_BOLD}${COLOR_GREEN}  ✓ Installation complete!${COLOR_RESET}"
     echo -e "${COLOR_BOLD}${COLOR_GREEN}============================================${COLOR_RESET}"
     echo ""
-    echo -e "  Run ${COLOR_BOLD}git ${GIT_ALIAS_NAME} --help${COLOR_RESET} to see usage"
+    echo -e "  Run ${COLOR_BOLD}git ${GIT_ALIAS_NAME} -h${COLOR_RESET} to see usage"
     echo -e "  Run ${COLOR_BOLD}git ${GIT_ALIAS_NAME} --version${COLOR_RESET} to check version"
     echo ""
 fi

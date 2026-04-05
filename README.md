@@ -88,7 +88,7 @@ git claude clean
 git claude clean feature/my-feature
 
 # Show help
-git claude --help
+git claude -h
 
 # Show version
 git claude --version

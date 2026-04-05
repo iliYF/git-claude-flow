@@ -27,7 +27,7 @@
 #
 # Usage:
 #   git claude <branch-name>
-#   git claude --help
+#   git claude -h | -info
 #
 # Examples:
 #   git claude feature/my-feature
@@ -107,7 +107,7 @@ show_help() {
     echo "  git claude <branch-name>    Create a worktree for the branch and launch Claude Code"
     echo "  git claude list             List all worktrees in the current repository"
     echo "  git claude clean [branch]   Remove a worktree (interactive if branch not specified)"
-    echo "  git claude -h | --help      Show this help message"
+    echo "  git claude -h | -info       Show this help message"
     echo ""
     echo -e "${COLOR_BOLD}Arguments:${COLOR_RESET}"
     echo "  <branch-name>    Target branch name (local or remote)"
@@ -328,7 +328,7 @@ cmd_clean() {
 # =============================================================================
 
 case "$1" in
-    -h|--help)
+    -h|-info)
         show_help
         exit 0
         ;;
