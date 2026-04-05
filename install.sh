@@ -448,7 +448,7 @@ uninstall_local() {
 #   mode=user
 #   alias=claude
 #   cmd=claude
-#   version=1.0.0
+#   version=1.0.1
 #   md5=abc123...
 #   installed_at=2025-01-01T12:00:00
 
