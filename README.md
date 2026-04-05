@@ -43,15 +43,17 @@ bash install.sh
 
 ## Install Modes
 
-| Mode | Install Path | Requires sudo | Scope |
-|------|-------------|---------------|-------|
-| `system` | `/usr/local/bin/git-claude` | Yes | All users, all repositories |
-| `user` | `~/.local/bin/git-claude` | No | Current user, all repositories |
-| `local` | `<repo>/scripts/git-claude-flow` | No | Current git repository only |
+| Mode | Script Location | Access Mechanism | Requires sudo | Scope |
+|------|----------------|-----------------|---------------|-------|
+| `system` | `~/.git-claude-flow/git-claude-flow` | git-subcommand mechanism (symlink in `/usr/local/bin/`) | Yes | All users, all repositories |
+| `user` | `~/.git-claude-flow/git-claude-flow` | git config mechanism (`git config --global alias`) | No | Current user, all repositories |
+| `local` | `<repo>/scripts/git-claude-flow` | git config mechanism (`git config alias`, repo-level) | No | Current git repository only |
 
-> **`system` / `user` mode**: Once installed to PATH, git automatically recognizes `git-claude` as an external command, enabling `git claude` directly.
+> **`system` mode**: Uses the **git-subcommand mechanism**. Script is stored in `~/.git-claude-flow/`, with a symlink `git-<alias>` created in `/usr/local/bin/`. Git automatically discovers it as an external subcommand — no git config needed.
 >
-> **`local` mode**: Script is installed inside the repository and invoked via a repository-level git alias.
+> **`user` mode**: Uses the **git config mechanism**. Script is stored in `~/.git-claude-flow/`, and a global git alias is configured in `~/.gitconfig`. Available to the current user in all repositories, no sudo required.
+>
+> **`local` mode**: Uses the **git config mechanism**. Script is copied into the repository's `scripts/` directory, with a repo-level git alias configured in `.git/config`. Great for team sharing via git.
 
 ---
 
@@ -226,7 +228,7 @@ Or manually edit the `CLAUDE_CMD` variable in the installed script:
 
 ```bash
 # Edit the installed script
-vim ~/.local/bin/git-claude
+vim ~/.git-claude-flow/git-claude-flow
 # Change the variable at the top:
 # CLAUDE_CMD="claude-internal"
 ```

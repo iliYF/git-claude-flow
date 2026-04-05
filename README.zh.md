@@ -43,16 +43,17 @@ bash install.sh
 
 ## 安装模式说明
 
-| 模式 | 安装位置 | 权限 | 生效范围 |
-|------|---------|------|---------|
-| `system` | `/usr/local/bin/git-claude` | 需要 sudo | 所有用户、所有仓库 |
-| `user` | `~/.local/bin/git-claude` | 无需 sudo | 当前用户、所有仓库 |
-| `local` | `<仓库>/scripts/git-claude-flow` | 无需 sudo | 仅当前 git 仓库 |
+| 模式 | 脚本位置 | 访问机制 | 权限 | 生效范围 |
+|------|---------|---------|------|--------|
+| `system` | `~/.git-claude-flow/git-claude-flow` | git-subcommand 机制（符号链接到 `/usr/local/bin/`） | 需要 sudo | 所有用户、所有仓库 |
+| `user` | `~/.git-claude-flow/git-claude-flow` | git config 机制（`git config --global alias`） | 无需 sudo | 当前用户、所有仓库 |
+| `local` | `<仓库>/scripts/git-claude-flow` | git config 机制（`git config alias`，仓库级） | 无需 sudo | 仅当前 git 仓库 |
 
-> **`system` / `user` 模式**：脚本安装到 PATH 后，git 会自动识别 `git-claude` 为外部命令，直接支持 `git claude` 调用。
+> **`system` 模式**：使用 **git-subcommand 机制**。脚本存放在 `~/.git-claude-flow/`，在 `/usr/local/bin/` 创建符号链接 `git-<alias>`。Git 自动将其识别为外部子命令，无需配置 git alias。
 >
-> **`local` 模式**：脚本安装到仓库内，通过配置仓库级 git alias 调用。
-
+> **`user` 模式**：使用 **git config 机制**。脚本存放在 `~/.git-claude-flow/`，通过 `~/.gitconfig` 中的全局 git alias 调用。当前用户所有仓库可用，无需 sudo。
+>
+> **`local` 模式**：使用 **git config 机制**。脚本复制到仓库的 `scripts/` 目录，通过 `.git/config` 中的仓库级 git alias 调用。适合通过 git 进行团队共享。
 ---
 
 ## 安装脚本参数
@@ -226,8 +227,8 @@ bash install.sh --cmd claude-internal
 
 ```bash
 # 编辑已安装的脚本
-vim ~/.local/bin/git-claude
-# 修改第一行变量：
+vim ~/.git-claude-flow/git-claude-flow
+# 修改顶部变量：
 # CLAUDE_CMD="claude-internal"
 ```
 
