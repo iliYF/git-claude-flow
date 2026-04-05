@@ -4,45 +4,6 @@ English | [中文](README.zh.md)
 
 > A Git workflow tool that deeply integrates **Git Worktree** with **Claude Code**, designed for **parallel multi-task AI-assisted development**.
 
-### The Problem It Solves
-
-When using Claude Code for parallel development across multiple tasks, the typical approach involves manually managing Git Worktrees and multiple Claude sessions:
-
-```bash
-# Manual workflow (tedious)
-git worktree add ../myapp-feature-login feature/login  # manually create worktree
-cd ../myapp-feature-login                              # manually switch directory
-claude                                                 # manually launch Claude Code
-
-# Another task? Repeat the whole thing...
-git worktree add ../myapp-bugfix-crash bugfix/crash
-cd ../myapp-bugfix-crash
-claude
-```
-
-Every new task requires repeating this sequence, keeping track of each worktree path, and manually cleaning up when done.
-
-**git-claude-flow compresses all of this into a single command**, forming a complete git flow:
-
-```bash
-# One command: create worktree → switch directory → launch Claude Code
-git claude feature/login
-git claude bugfix/crash   # another terminal, runs in parallel, fully isolated
-```
-
----
-
-## Repository Structure
-
-```
-git-claude-flow/
-├── install.sh              # Installation script (root directory)
-└── scripts/
-    └── git-claude-flow     # Core script
-```
-
----
-
 ## Quick Install
 
 ### One-line Install (Recommended)
@@ -104,6 +65,7 @@ Options:
   --alias <name>      git alias name (default: claude)
   --cmd   <command>   Claude Code command name (default: claude)
   --help              Show help information
+  --version           Show version information
 ```
 
 ---
@@ -127,6 +89,51 @@ git claude clean feature/my-feature
 
 # Show help
 git claude --help
+
+# Show version
+git claude --version
+```
+
+---
+
+## The Problem It Solves
+
+Claude Code has a built-in `--worktree` (`-w`) flag that can quickly create a worktree and start a session:
+
+```bash
+claude --worktree feature-auth   # create worktree and launch Claude
+claude --worktree bugfix-123
+```
+
+But this approach has clear limitations:
+
+- **No branch control**: Automatically creates a new `worktree-<name>` branch — can't use existing local or remote branches
+- **Fixed path**: Worktrees are created under `<repo>/.claude/worktrees/`, not the standard sibling-directory convention
+- **Not a git flow**: `claude -w` is a Claude tool flag, not integrated into the Git workflow — teams can't manage worktrees uniformly via `git` commands
+
+The more common scenario is **manual Git Worktree + multiple Claude sessions**:
+
+```bash
+# Manual workflow (tedious)
+git worktree add ../myapp-feature-login feature/login  # manually create worktree
+cd ../myapp-feature-login                              # manually switch directory
+claude                                                 # manually launch Claude Code
+
+# Another task? Repeat the whole thing...
+git worktree add ../myapp-bugfix-crash bugfix/crash
+cd ../myapp-bugfix-crash
+claude
+```
+
+Every new task requires repeating this sequence, keeping track of each worktree path, and manually cleaning up when done.
+
+**git-claude-flow compresses all of this into a single `git` command**, forming a complete git flow:
+
+```bash
+# One command: smart branch resolution → create worktree → switch directory → launch Claude Code
+git claude feature/login     # use existing branch (local or remote)
+git claude bugfix/crash      # another terminal, runs in parallel, fully isolated
+git claude new-feature       # branch doesn't exist? auto-create from current HEAD
 ```
 
 ---
@@ -204,44 +211,6 @@ During cleanup, you will be asked:
 | bash | 3.2+ | macOS built-in version is sufficient |
 | git | 2.5.0+ | Minimum version with worktree support |
 | Claude Code | Latest | `npm install -g @anthropic-ai/claude-code` |
-
----
-
-## Manual Setup (Without Installer)
-
-### Option 1: Configure git alias (Recommended, no system permissions needed)
-
-```bash
-# Clone the repository
-git clone https://github.com/iliYF/git-claude-flow.git ~/.git-claude-flow
-
-# Configure global git alias
-git config --global alias.claude '!bash "$HOME/.git-claude-flow/scripts/git-claude-flow"'
-```
-
-### Option 2: Install to system PATH
-
-```bash
-# Install to /usr/local/bin (requires sudo)
-sudo install -m 755 scripts/git-claude-flow /usr/local/bin/git-claude
-
-# Or install to user directory (no sudo required)
-mkdir -p ~/.local/bin
-install -m 755 scripts/git-claude-flow ~/.local/bin/git-claude
-# Make sure ~/.local/bin is in PATH
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-```
-
-### Option 3: Repository-scoped only
-
-```bash
-# Copy the script into your repository
-mkdir -p scripts
-cp /path/to/git-claude-flow/scripts/git-claude-flow scripts/
-
-# Configure a repository-level alias
-git config alias.claude '!bash "$(git rev-parse --show-toplevel)/scripts/git-claude-flow"'
-```
 
 ---
 

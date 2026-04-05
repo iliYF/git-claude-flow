@@ -655,5 +655,6 @@ else
     echo -e "${COLOR_BOLD}${COLOR_GREEN}============================================${COLOR_RESET}"
     echo ""
     echo -e "  Run ${COLOR_BOLD}git ${GIT_ALIAS_NAME} --help${COLOR_RESET} to see usage"
+    echo -e "  Run ${COLOR_BOLD}git ${GIT_ALIAS_NAME} --version${COLOR_RESET} to check version"
     echo ""
 fi

@@ -44,6 +44,9 @@
 # Claude Code command name (change this variable to switch commands)
 CLAUDE_CMD="claude-internal"
 
+# Version
+VERSION="1.0.0"
+
 set -euo pipefail
 
 # =============================================================================
@@ -129,6 +132,8 @@ show_help() {
     echo ""
     echo "  # Global alias (requires absolute path):"
     echo "  git config --global alias.claude '!bash \"/path/to/scripts/git-claude\"'"
+    echo ""
+    echo -e "${COLOR_BOLD}Version:${COLOR_RESET} ${VERSION}"
 }
 
 # =============================================================================
@@ -325,6 +330,10 @@ cmd_clean() {
 case "$1" in
     -h|--help)
         show_help
+        exit 0
+        ;;
+    -v|--version)
+        echo "git-claude-flow ${VERSION}"
         exit 0
         ;;
     list)

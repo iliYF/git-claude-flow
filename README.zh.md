@@ -2,23 +2,7 @@
 
 # git-claude-flow
 
-> 一个将 **Git Worktree** 与 **Claude Code** 深度整合的 Git 工作流工具。
-
-基于指定分支自动创建独立的 worktree 工作目录，并在其中启动 Claude Code，让你可以同时在多个分支上并行开发，互不干扰。
-
-
----
-
-## 目录结构
-
-```
-git-claude-flow/
-├── install.sh              # 安装脚本（根目录）
-└── scripts/
-    └── git-claude-flow     # 核心脚本
-```
-
----
+> 一个将 **Git Worktree** 与 **Claude Code** 深度整合的 Git 工作流工具，专为**多任务并行 AI 编程**场景设计。
 
 ## 快速安装
 
@@ -81,6 +65,7 @@ bash install.sh [选项]
   --alias <name>      git alias 别名（默认：claude）
   --cmd   <command>   Claude Code 命令名（默认：claude）
   --help              显示帮助信息
+  --version           显示版本信息
 ```
 
 ---
@@ -104,6 +89,51 @@ git claude clean feature/my-feature
 
 # 显示帮助
 git claude --help
+
+# 显示版本
+git claude --version
+```
+
+---
+
+## 解决的问题
+
+Claude Code 虽然内置了 `--worktree`（`-w`）标志，可以快速创建 worktree 并启动会话：
+
+```bash
+claude --worktree feature-auth   # 创建 worktree 并启动 Claude
+claude --worktree bugfix-123
+```
+
+但这种方式有明显局限：
+
+- **分支不可控**：自动创建 `worktree-<name>` 新分支，无法基于已有的本地/远程分支
+- **路径固定**：worktree 创建在 `<repo>/.claude/worktrees/` 下，不符合 Git 标准的同级目录惯例
+- **不是 git flow**：`claude -w` 是 Claude 工具的参数，不融入 Git 工作流，团队协作时无法通过 `git` 命令统一管理
+
+更常见的场景是**手动 Git Worktree + 多 Claude 会话**：
+
+```bash
+# 手动流程（繁琐）
+git worktree add ../myapp-feature-login feature/login  # 手动创建 worktree
+cd ../myapp-feature-login                              # 手动切换目录
+claude                                                 # 手动启动 Claude Code
+
+# 另一个任务，再重复一遍...
+git worktree add ../myapp-bugfix-crash bugfix/crash
+cd ../myapp-bugfix-crash
+claude
+```
+
+每次开启新任务都要重复这套流程，还要记住各个 worktree 的路径，完成后还要手动清理。
+
+**git-claude-flow 将这一切压缩为一条 `git` 命令**，形成完整的 git flow：
+
+```bash
+# 一条命令完成：智能分支解析 → 创建 worktree → 切换目录 → 启动 Claude Code
+git claude feature/login     # 基于已有分支（本地或远程）
+git claude bugfix/crash      # 另一个终端，并行运行，互不干扰
+git claude new-feature       # 不存在则自动从当前 HEAD 创建新分支
 ```
 
 ---
@@ -181,44 +211,6 @@ git claude clean feature/login
 | bash | 3.2+ | macOS 自带版本即可 |
 | git | 2.5.0+ | 支持 worktree 的最低版本 |
 | Claude Code | 最新版 | `npm install -g @anthropic-ai/claude-code` |
-
----
-
-## 手动配置（不使用安装脚本）
-
-### 方式一：配置 git alias（推荐，无需系统权限）
-
-```bash
-# 克隆仓库到本地
-git clone https://github.com/iliYF/git-claude-flow.git ~/.git-claude-flow
-
-# 配置全局 git alias
-git config --global alias.claude '!bash "$HOME/.git-claude-flow/scripts/git-claude-flow"'
-```
-
-### 方式二：安装到系统路径
-
-```bash
-# 安装到 /usr/local/bin（需要 sudo）
-sudo install -m 755 scripts/git-claude-flow /usr/local/bin/git-claude
-
-# 或安装到用户目录（无需 sudo）
-mkdir -p ~/.local/bin
-install -m 755 scripts/git-claude-flow ~/.local/bin/git-claude
-# 确保 ~/.local/bin 在 PATH 中
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-```
-
-### 方式三：仅对当前仓库生效
-
-```bash
-# 复制脚本到仓库
-mkdir -p scripts
-cp /path/to/git-claude-flow/scripts/git-claude-flow scripts/
-
-# 配置仓库级 alias
-git config alias.claude '!bash "$(git rev-parse --show-toplevel)/scripts/git-claude-flow"'
-```
 
 ---
 
