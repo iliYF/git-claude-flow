@@ -19,7 +19,7 @@
 #   # Uninstall
 #   bash install.sh --uninstall
 #   bash install.sh --uninstall --mode system
-#   bash install.sh --uninstall --alias cf
+#   bash install.sh --uninstall --mode all
 #
 # Install modes:
 #   system  Download script to ~/.git-claude-flow/git-claude-flow, then symlink to
@@ -101,7 +101,7 @@ show_help() {
     echo "  bash install.sh [options]"
     echo ""
     echo -e "${COLOR_BOLD}Options:${COLOR_RESET}"
-    echo -e "  ${COLOR_CYAN}--mode${COLOR_RESET} <mode>      Install mode: system | user | local"
+    echo -e "  ${COLOR_CYAN}--mode${COLOR_RESET} <mode>      Install mode: system | user | local (uninstall also supports: all)"
     echo -e "  ${COLOR_CYAN}--alias${COLOR_RESET} <name>     git alias name (default: claude)"
     echo -e "  ${COLOR_CYAN}--cmd${COLOR_RESET} <command>    Claude Code command name (default: claude)"
     echo -e "  ${COLOR_CYAN}--uninstall${COLOR_RESET}        Uninstall git-claude-flow"
@@ -121,7 +121,7 @@ show_help() {
     echo -e "${COLOR_BOLD}Uninstall examples:${COLOR_RESET}"
     echo "  bash install.sh --uninstall"
     echo "  bash install.sh --uninstall --mode system"
-    echo "  bash install.sh --uninstall --alias cf"
+    echo "  bash install.sh --uninstall --mode all"
 }
 # =============================================================================
 # Argument parsing
@@ -177,7 +177,7 @@ get_script_content() {
         # Online install: download script from GitHub to a temp file
         local tmp_file
         tmp_file=$(mktemp /tmp/git-claude-XXXXXX)
-        info_msg "Downloading script from GitHub: ${SCRIPT_URL}"
+        info_msg "Downloading script from GitHub: ${SCRIPT_URL}" >&2
         if command -v curl &>/dev/null; then
             curl -sSL "$SCRIPT_URL" -o "$tmp_file" || die "Download failed. Check your network or URL: ${SCRIPT_URL}"
         elif command -v wget &>/dev/null; then
@@ -220,6 +220,31 @@ ask_alias_name() {
     info_success "git alias name: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
 }
 
+# Validate that the Claude command exists in PATH
+# Returns 0 if valid, 1 if not found
+check_claude_cmd() {
+    command -v "$CLAUDE_CMD_NAME" &>/dev/null
+}
+
+# Prompt user to re-enter or exit when command not found
+# Used after command validation fails
+prompt_retry_claude_cmd() {
+    while true; do
+        info_warn "Command '${CLAUDE_CMD_NAME}' not found in PATH."
+        printf "  Re-enter command name or press Enter to exit: "
+        local input_cmd
+        read_tty input_cmd
+        if [[ -z "$input_cmd" ]]; then
+            die "Installation cancelled. Please install Claude Code first."
+        fi
+        CLAUDE_CMD_NAME="$input_cmd"
+        if check_claude_cmd; then
+            info_success "Claude Code command: ${COLOR_BOLD}${CLAUDE_CMD_NAME}${COLOR_RESET}"
+            return 0
+        fi
+    done
+}
+
 # Prompt for Claude Code command name
 ask_claude_cmd() {
     echo ""
@@ -232,6 +257,9 @@ ask_claude_cmd() {
         CLAUDE_CMD_NAME="$input_cmd"
     fi
     info_success "Claude Code command: ${COLOR_BOLD}${CLAUDE_CMD_NAME}${COLOR_RESET}"
+    if ! check_claude_cmd; then
+        prompt_retry_claude_cmd
+    fi
 }
 
 # =============================================================================
@@ -242,9 +270,9 @@ select_mode() {
     echo ""
     echo -e "${COLOR_BOLD}Select install mode:${COLOR_RESET}"
     echo ""
-    echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}system${COLOR_RESET}  — Script to ${USER_INSTALL_DIR}/, symlink ${SYSTEM_INSTALL_DIR}/git-<alias> (all users, requires sudo, no git config needed)"
-    echo -e "  ${COLOR_CYAN}[2]${COLOR_RESET} ${COLOR_BOLD}user${COLOR_RESET}    — Script to ${USER_INSTALL_DIR}/, --global alias (current user, no sudo)"
-    echo -e "  ${COLOR_CYAN}[3]${COLOR_RESET} ${COLOR_BOLD}local${COLOR_RESET}   — Copy to <repo>/scripts/, repo-level alias (current repo only, team-friendly)"
+    echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}system${COLOR_RESET}  — All users, requires sudo, installs to ${SYSTEM_INSTALL_DIR}/git-<alias>"
+    echo -e "  ${COLOR_CYAN}[2]${COLOR_RESET} ${COLOR_BOLD}user${COLOR_RESET}    — Current user only, set git alias.<name> to ~/.gitconfig"
+    echo -e "  ${COLOR_CYAN}[3]${COLOR_RESET} ${COLOR_BOLD}local${COLOR_RESET}   — Current repo only, set git alias.<name> to .git/config"
     echo ""
     echo -e "  ${COLOR_YELLOW}[0]${COLOR_RESET} Cancel"
     echo ""
@@ -264,74 +292,89 @@ select_mode() {
 # Uninstall
 # =============================================================================
 
+# Detect alias from config file or git config for uninstall
+detect_uninstall_alias() {
+    local detected_alias=""
+    case "$INSTALL_MODE" in
+        system|user)
+            if [[ -f "$CONFIG_FILE" ]]; then
+                detected_alias=$(_config_get "alias")
+            fi
+            ;;
+        local)
+            # Try to find alias pointing to git-claude-flow in repo .git/config
+            if git rev-parse --is-inside-work-tree &>/dev/null; then
+                detected_alias=$(git config --local --get-regexp '^alias\.' 2>/dev/null \
+                    | grep 'git-claude-flow' | head -1 | sed 's/^alias\.\([^ ]*\).*/\1/' || true)
+            fi
+            ;;
+    esac
+    if [[ -n "$detected_alias" ]]; then
+        GIT_ALIAS_NAME="$detected_alias"
+        info_success "Detected alias: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
+    fi
+}
+
 # Select uninstall mode interactively
 select_uninstall_mode() {
     echo ""
     echo -e "${COLOR_BOLD}Select uninstall mode:${COLOR_RESET}"
     echo ""
-    echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}system${COLOR_RESET}  — Remove symlink(s) ${SYSTEM_INSTALL_DIR}/git-<alias> + script ${USER_INSTALL_DIR}/"
-    echo -e "  ${COLOR_CYAN}[2]${COLOR_RESET} ${COLOR_BOLD}user${COLOR_RESET}    — Remove script ${USER_INSTALL_DIR}/ + global alias"
-    echo -e "  ${COLOR_CYAN}[3]${COLOR_RESET} ${COLOR_BOLD}local${COLOR_RESET}   — Remove <repo>/scripts/git-claude-flow + repo alias"
+    echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}system${COLOR_RESET}  — All users, executable at ${SYSTEM_INSTALL_DIR}/git-<alias>"
+    echo -e "  ${COLOR_CYAN}[2]${COLOR_RESET} ${COLOR_BOLD}user${COLOR_RESET}    — Current user only, git alias.<name> in ~/.gitconfig"
+    echo -e "  ${COLOR_CYAN}[3]${COLOR_RESET} ${COLOR_BOLD}local${COLOR_RESET}   — Current repo only, git alias.<name> in .git/config"
+    echo -e "  ${COLOR_CYAN}[4]${COLOR_RESET} ${COLOR_BOLD}all${COLOR_RESET}     — Remove all installations"
     echo ""
     echo -e "  ${COLOR_YELLOW}[0]${COLOR_RESET} Cancel"
     echo ""
-    printf "Enter number [0-3] (default: 2): "
+    printf "Enter number [0-4] (default: 4): "
     local choice
     read_tty choice
-    choice="${choice:-2}"
+    choice="${choice:-4}"
     case "$choice" in
         1) INSTALL_MODE="system" ;;
         2) INSTALL_MODE="user" ;;
         3) INSTALL_MODE="local" ;;
+        4) INSTALL_MODE="all" ;;
         0) info_msg "Uninstall cancelled."; exit 0 ;;
         *) die "Invalid option: ${choice}" ;;
     esac
 }
 
-# Prompt for alias name during uninstall
-ask_alias_name_for_uninstall() {
-    echo ""
-    echo -e "${COLOR_BOLD}Which git alias should be removed?${COLOR_RESET}"
-    printf "Enter alias name (default: ${COLOR_BOLD}claude${COLOR_RESET}): "
-    local input_alias
-    read_tty input_alias
-    if [[ -n "$input_alias" ]]; then
-        GIT_ALIAS_NAME="$input_alias"
-    fi
-    info_success "Will remove alias: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
-}
-
 uninstall_system() {
     local script_dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
 
-    # Step 1: Remove symlink(s) from /usr/local/bin/
-    # Always remove git-claude (default symlink)
-    # Also remove git-<alias> if alias differs from 'claude'
+    # Check if system mode was ever installed
+    local has_symlink=false
     local symlinks_to_remove=("${SYSTEM_INSTALL_DIR}/git-claude")
     if [[ "$GIT_ALIAS_NAME" != "claude" ]]; then
         symlinks_to_remove+=("${SYSTEM_INSTALL_DIR}/git-${GIT_ALIAS_NAME}")
     fi
+    for s in "${symlinks_to_remove[@]}"; do
+        [[ -L "$s" || -f "$s" ]] && has_symlink=true
+    done
+    if ! $has_symlink && [[ ! -f "$script_dest" ]]; then
+        info_warn "System mode not installed, skipping."
+        return 0
+    fi
+
+    # Step 1: Remove symlink(s) from /usr/local/bin/
     for symlink_dest in "${symlinks_to_remove[@]}"; do
-        if [[ -L "$symlink_dest" ]]; then
-            info_msg "Removing symlink: ${symlink_dest} (requires sudo)"
-            sudo rm -f "$symlink_dest" || die "Failed to remove symlink. Please verify sudo permissions."
-            info_success "Removed symlink: ${symlink_dest}"
-        elif [[ -f "$symlink_dest" ]]; then
-            info_msg "Removing file: ${symlink_dest} (requires sudo)"
-            sudo rm -f "$symlink_dest" || die "Failed to remove ${symlink_dest}. Please verify sudo permissions."
-            info_success "Removed: ${symlink_dest}"
-        else
-            info_warn "Not found: ${symlink_dest} (already removed or never installed)"
+        if [[ -L "$symlink_dest" || -f "$symlink_dest" ]]; then
+            info_msg "Removing: ${symlink_dest} (requires sudo)"
+            if ! sudo rm -f "$symlink_dest"; then
+                info_warn "Failed to remove: ${symlink_dest}. Please verify sudo permissions."
+            else
+                info_success "Removed: ${symlink_dest}"
+            fi
         fi
     done
 
     # Step 2: Remove script and config from ~/.git-claude-flow/
     if [[ -f "$script_dest" ]]; then
         info_msg "Removing script: ${script_dest}"
-        rm -f "$script_dest" || die "Failed to remove ${script_dest}."
+        rm -f "$script_dest" || info_warn "Failed to remove ${script_dest}."
         info_success "Removed script: ${script_dest}"
-    else
-        info_warn "Not found: ${script_dest} (already removed or never installed)"
     fi
     remove_config
     rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
@@ -339,51 +382,61 @@ uninstall_system() {
 
 uninstall_user() {
     local dest="${USER_INSTALL_DIR}/${SCRIPT_INSTALL_NAME}"
+    local has_alias=false
+    git config --global "alias.${GIT_ALIAS_NAME}" &>/dev/null && has_alias=true
+
+    # Check if user mode was ever installed
+    if [[ ! -f "$dest" ]] && ! $has_alias; then
+        info_warn "User mode not installed, skipping."
+        return 0
+    fi
+
     if [[ -f "$dest" ]]; then
         info_msg "Removing: ${dest}"
-        rm -f "$dest" || die "Failed to remove ${dest}."
+        rm -f "$dest" || info_warn "Failed to remove ${dest}."
         info_success "Removed: ${dest}"
-    else
-        info_warn "Not found: ${dest} (already removed or never installed)"
     fi
     remove_config
     # Remove directory if empty
     rmdir "${USER_INSTALL_DIR}" 2>/dev/null && info_success "Removed empty directory: ${USER_INSTALL_DIR}" || true
     # Remove global git alias (--global)
-    if git config --global "alias.${GIT_ALIAS_NAME}" &>/dev/null; then
+    if $has_alias; then
         info_msg "Removing global git alias: ${GIT_ALIAS_NAME}"
         git config --global --unset "alias.${GIT_ALIAS_NAME}"
         info_success "Removed global git alias: git ${GIT_ALIAS_NAME}"
-    else
-        info_warn "Global git alias '${GIT_ALIAS_NAME}' not found (already removed or never configured)"
     fi
 }
 
 uninstall_local() {
     # Check if inside a git repository
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        die "Not a git repository. local mode must be run from a git repository root."
+        info_warn "Not in a git repository, skipping local uninstall."
+        return 0
     fi
 
     local repo_root
     repo_root=$(git rev-parse --show-toplevel)
     local dest="${repo_root}/scripts/${SCRIPT_INSTALL_NAME}"
+    local has_alias=false
+    git config --local "alias.${GIT_ALIAS_NAME}" &>/dev/null && has_alias=true
+
+    # Check if local mode was ever installed
+    if [[ ! -f "$dest" ]] && ! $has_alias; then
+        info_warn "Local mode not installed in this repo, skipping."
+        return 0
+    fi
 
     if [[ -f "$dest" ]]; then
         info_msg "Removing: ${dest}"
-        rm -f "$dest" || die "Failed to remove ${dest}."
+        rm -f "$dest" || info_warn "Failed to remove ${dest}."
         info_success "Removed: ${dest}"
-    else
-        info_warn "Not found: ${dest} (already removed or never installed)"
     fi
 
     # Remove repository-level git alias
-    if git config "alias.${GIT_ALIAS_NAME}" &>/dev/null; then
+    if $has_alias; then
         info_msg "Removing repository-level git alias: ${GIT_ALIAS_NAME}"
         git config --unset "alias.${GIT_ALIAS_NAME}"
         info_success "Removed git alias: git ${GIT_ALIAS_NAME}"
-    else
-        info_warn "Repository git alias '${GIT_ALIAS_NAME}' not found (already removed or never configured)"
     fi
 }
 
@@ -453,6 +506,52 @@ remove_config() {
 # Detect existing installation (called before interactive prompts)
 # =============================================================================
 
+# Clean up old mode artifacts when switching install modes
+# Usage: _cleanup_old_mode <old_mode> <old_alias>
+_cleanup_old_mode() {
+    local old_mode="$1"
+    local old_alias="${2:-$GIT_ALIAS_NAME}"
+    case "$old_mode" in
+        system)
+            # Remove symlinks from /usr/local/bin/
+            local symlinks=("${SYSTEM_INSTALL_DIR}/git-claude")
+            if [[ "$old_alias" != "claude" ]]; then
+                symlinks+=("${SYSTEM_INSTALL_DIR}/git-${old_alias}")
+            fi
+            for s in "${symlinks[@]}"; do
+                if [[ -L "$s" || -f "$s" ]]; then
+                    info_msg "Removing old symlink: ${s} (requires sudo)"
+                    sudo rm -f "$s" 2>/dev/null && info_success "Removed: ${s}" || info_warn "Failed to remove: ${s}"
+                fi
+            done
+            ;;
+        user)
+            # Remove global git alias
+            if git config --global "alias.${old_alias}" &>/dev/null; then
+                info_msg "Removing old global git alias: ${old_alias}"
+                git config --global --unset "alias.${old_alias}"
+                info_success "Removed global git alias: git ${old_alias}"
+            fi
+            ;;
+        local)
+            # Remove local script and alias
+            if git rev-parse --is-inside-work-tree &>/dev/null; then
+                local repo_root
+                repo_root=$(git rev-parse --show-toplevel)
+                local old_dest="${repo_root}/scripts/${SCRIPT_INSTALL_NAME}"
+                if [[ -f "$old_dest" ]]; then
+                    rm -f "$old_dest"
+                    info_success "Removed old local script: ${old_dest}"
+                fi
+                if git config --local "alias.${old_alias}" &>/dev/null; then
+                    git config --local --unset "alias.${old_alias}"
+                    info_success "Removed old local git alias: git ${old_alias}"
+                fi
+            fi
+            ;;
+    esac
+}
+
 # Check if already installed; if so, prompt user to reuse / reinstall / exit
 check_existing_installation() {
     local installed_script=""
@@ -505,9 +604,10 @@ check_existing_installation() {
     existing_alias="${existing_alias:-claude}"
     existing_cmd="${existing_cmd:-claude}"
     existing_version="${existing_version:-unknown}"
+    existing_mode="${existing_mode:-$INSTALL_MODE}"
 
     echo -e "${COLOR_YELLOW}════════════════════════════════════════════${COLOR_RESET}"
-    echo -e "${COLOR_YELLOW}  git-claude-flow is already installed (${INSTALL_MODE} mode)${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}  git-claude-flow is already installed (${existing_mode} mode)${COLOR_RESET}"
     echo -e "${COLOR_YELLOW}════════════════════════════════════════════${COLOR_RESET}"
     echo ""
     echo -e "  Script:  ${COLOR_BOLD}${installed_script}${COLOR_RESET}"
@@ -516,6 +616,10 @@ check_existing_installation() {
     echo -e "  Version: ${COLOR_BOLD}${existing_version}${COLOR_RESET}"
     if [[ -n "$existing_md5" ]]; then
         echo -e "  MD5:     ${COLOR_BOLD}${existing_md5}${COLOR_RESET}"
+    fi
+    if [[ "$existing_mode" != "$INSTALL_MODE" ]]; then
+        echo ""
+        echo -e "  ${COLOR_YELLOW}⚠ Mode change: ${existing_mode} → ${INSTALL_MODE}${COLOR_RESET}"
     fi
     echo ""
     echo -e "  ${COLOR_CYAN}[1]${COLOR_RESET} ${COLOR_BOLD}Reuse${COLOR_RESET}      — Keep current config, update script only"
@@ -533,11 +637,18 @@ check_existing_installation() {
             CLAUDE_CMD_NAME="$existing_cmd"
             _ALIAS_SET=true
             _CMD_SET=true
+            # If mode changed, clean up old mode first
+            if [[ "$existing_mode" != "$INSTALL_MODE" ]]; then
+                info_msg "Cleaning up previous ${existing_mode} mode installation..."
+                _cleanup_old_mode "$existing_mode" "$existing_alias"
+            fi
             info_success "Reusing existing config: git ${GIT_ALIAS_NAME}, cmd=${CLAUDE_CMD_NAME}"
             ;;
         2)
-            # Reinstall: continue with normal interactive flow
+            # Reinstall: always clean up old installation first
             _REINSTALL=true
+            info_msg "Cleaning up previous ${existing_mode} mode installation..."
+            _cleanup_old_mode "$existing_mode" "$existing_alias"
             info_msg "Proceeding with fresh configuration..."
             ;;
         0)
@@ -759,8 +870,6 @@ install_local() {
     echo -e "  You can now use in this repository: ${COLOR_BOLD}git ${GIT_ALIAS_NAME} <branch>${COLOR_RESET}"
     echo ""
     info_warn "Note: this alias only applies to the current repository (${repo_root})."
-    echo "  For global access, choose system or user mode, or configure a global alias manually:"
-    echo -e "  ${COLOR_BOLD}git config --global alias.${GIT_ALIAS_NAME} '!bash \"/path/to/scripts/${SCRIPT_INSTALL_NAME}\"'${COLOR_RESET}"
 }
 # =============================================================================
 # Main
@@ -782,18 +891,21 @@ if $_UNINSTALL; then
         select_uninstall_mode
     fi
 
-    # Step 2: Prompt for alias name (if not set via --alias flag)
-    if ! $_ALIAS_SET; then
-        ask_alias_name_for_uninstall
-    fi
-
     # Validate mode
     case "$INSTALL_MODE" in
-        system|user|local) ;;
-        *) die "Invalid uninstall mode: ${INSTALL_MODE}\n  Valid values: system | user | local" ;;
+        system|user|local|all) ;;
+        *) die "Invalid uninstall mode: ${INSTALL_MODE}\n  Valid values: system | user | local | all" ;;
     esac
 
-    info_msg "Uninstall mode: ${COLOR_BOLD}${INSTALL_MODE}${COLOR_RESET}"
+    # Step 2: Auto-detect alias from config; use --alias flag if provided
+    if [[ "$INSTALL_MODE" != "all" ]]; then
+        if ! $_ALIAS_SET; then
+            detect_uninstall_alias
+        fi
+        info_msg "Uninstall mode: ${COLOR_BOLD}${INSTALL_MODE}${COLOR_RESET}, alias: ${COLOR_BOLD}${GIT_ALIAS_NAME}${COLOR_RESET}"
+    else
+        info_msg "Uninstall mode: ${COLOR_BOLD}all${COLOR_RESET}"
+    fi
     echo ""
 
     # Run uninstaller
@@ -801,6 +913,26 @@ if $_UNINSTALL; then
         system) uninstall_system ;;
         user)   uninstall_user   ;;
         local)  uninstall_local  ;;
+        all)
+            # Detect alias from config for system/user cleanup
+            if ! $_ALIAS_SET && [[ -f "$CONFIG_FILE" ]]; then
+                cfg_alias=$(_config_get "alias")
+                [[ -n "$cfg_alias" ]] && GIT_ALIAS_NAME="$cfg_alias"
+            fi
+            info_msg "Removing system installation..."
+            uninstall_system
+            echo ""
+            info_msg "Removing user installation..."
+            uninstall_user
+            echo ""
+            # Detect local alias if in a git repo
+            if git rev-parse --is-inside-work-tree &>/dev/null; then
+                local_alias=$(git config --local --get-regexp '^alias\.' 2>/dev/null                    | grep 'git-claude-flow' | head -1 | sed 's/^alias\.\([^ ]*\).*/\1/' || true)
+                [[ -n "$local_alias" ]] && GIT_ALIAS_NAME="$local_alias"
+            fi
+            info_msg "Removing local installation..."
+            uninstall_local
+            ;;
     esac
 
     echo ""
@@ -839,6 +971,11 @@ else
     # Step 4: Prompt for Claude Code command name (if not set via --cmd flag and not reusing)
     if ! $_CMD_SET; then
         ask_claude_cmd
+    fi
+
+    # Step 4.5: Validate Claude command exists (for --cmd flag or reused config)
+    if $_CMD_SET && ! check_claude_cmd; then
+        prompt_retry_claude_cmd
     fi
 
     info_msg "Install mode: ${COLOR_BOLD}${INSTALL_MODE}${COLOR_RESET}"
