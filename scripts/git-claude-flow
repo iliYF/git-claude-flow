@@ -1,0 +1,548 @@
+#!/usr/bin/env bash
+# =============================================================================
+# git-claude — Git Worktree + Claude Code 快捷命令
+# =============================================================================
+#
+# 功能：
+#   基于指定分支创建 git worktree，自动切换到对应目录并启动 Claude Code。
+#
+# 安装方法（推荐：git alias，无需系统路径）：
+#   将脚本放在项目目录下（如 scripts/git-claude），然后配置 git alias：
+#
+#   # 仅对当前仓库生效
+#   git config alias.claude '!bash "$(git rev-parse --show-toplevel)/scripts/git-claude"'
+#
+#   # 对所有仓库全局生效（需指定脚本绝对路径）
+#   git config --global alias.claude '!bash "/path/to/scripts/git-claude"'
+#
+#   配置完成后即可使用：
+#   git claude <branch-name>
+#
+# 备选安装方法（安装到系统路径）：
+#   sudo cp git-claude /usr/local/bin/git-claude && sudo chmod +x /usr/local/bin/git-claude
+#   # 或安装到用户目录：
+#   cp git-claude ~/.local/bin/git-claude && chmod +x ~/.local/bin/git-claude
+#
+# 使用方法：
+#   git claude <branch-name>
+#   git claude --help
+#
+# 示例：
+#   git claude feature/my-feature
+#   git claude bugfix/fix-login
+#   git claude origin/feature/remote-branch
+#
+# 环境要求：
+#   - bash 3.2+
+#   - git 2.5.0+（支持 worktree 的最低版本）
+#   - cc（Claude Code CLI 别名，alias cc=claude）
+#
+# =============================================================================
+
+# Claude Code 命令名（如需切换命令，修改此变量即可）
+CLAUDE_CMD="claude-internal"
+
+set -euo pipefail
+
+# =============================================================================
+# 彩色输出函数
+# =============================================================================
+
+# 检测终端是否支持颜色
+if [ -t 1 ] && command -v tput &>/dev/null && tput colors &>/dev/null && [ "$(tput colors)" -ge 8 ]; then
+    COLOR_RESET="\033[0m"
+    COLOR_GREEN="\033[0;32m"
+    COLOR_YELLOW="\033[0;33m"
+    COLOR_RED="\033[0;31m"
+    COLOR_CYAN="\033[0;36m"
+    COLOR_BOLD="\033[1m"
+else
+    COLOR_RESET=""
+    COLOR_GREEN=""
+    COLOR_YELLOW=""
+    COLOR_RED=""
+    COLOR_CYAN=""
+    COLOR_BOLD=""
+fi
+
+# 打印成功信息（绿色）
+info_success() {
+    echo -e "${COLOR_GREEN}✓ $*${COLOR_RESET}"
+}
+
+# 打印普通信息（青色）
+info_msg() {
+    echo -e "${COLOR_CYAN}→ $*${COLOR_RESET}"
+}
+
+# 打印警告信息（黄色）
+info_warn() {
+    echo -e "${COLOR_YELLOW}⚠ $*${COLOR_RESET}"
+}
+
+# 打印错误信息（红色）并退出
+info_error() {
+    echo -e "${COLOR_RED}✗ $*${COLOR_RESET}" >&2
+}
+
+# 打印错误信息并退出（退出码 1）
+die() {
+    info_error "$*"
+    exit 1
+}
+
+# =============================================================================
+# 帮助信息
+# =============================================================================
+
+show_help() {
+    echo -e "${COLOR_BOLD}git-claude${COLOR_RESET} — Git Worktree + Claude Code 快捷命令"
+    echo ""
+    echo -e "${COLOR_BOLD}用法：${COLOR_RESET}"
+    echo "  git claude <branch-name>    基于指定分支创建 worktree 并启动 Claude Code"
+    echo "  git claude list             显示当前仓库所有 worktree"
+    echo "  git claude clean [branch]   清理 worktree（不指定分支则交互式选择）"
+    echo "  git claude -h | --help      显示此帮助信息"
+    echo ""
+    echo -e "${COLOR_BOLD}参数：${COLOR_RESET}"
+    echo "  <branch-name>    目标分支名（本地分支或远程分支均可）"
+    echo ""
+    echo -e "${COLOR_BOLD}示例：${COLOR_RESET}"
+    echo "  git claude feature/my-feature"
+    echo "  git claude bugfix/fix-login"
+    echo "  git claude origin/feature/remote-branch"
+    echo ""
+    echo -e "${COLOR_BOLD}Worktree 目录规则：${COLOR_RESET}"
+    echo "  worktree 将创建在主仓库的同级目录下，命名格式为："
+    echo "  {repo-name}-{branch-name-sanitized}"
+    echo "  （分支名中的 / . # 等特殊字符会被替换为 -）"
+    echo ""
+    echo -e "${COLOR_BOLD}环境要求：${COLOR_RESET}"
+    echo "  - git 2.5.0+"
+    echo "  - ${CLAUDE_CMD}（Claude Code CLI 别名，alias cc=claude）"
+    echo ""
+    echo -e "${COLOR_BOLD}安装方法（推荐）：${COLOR_RESET}"
+    echo "  # 将脚本放在项目目录下（如 scripts/git-claude），配置 git alias："
+    echo "  git config alias.claude '!bash \"\$(git rev-parse --show-toplevel)/scripts/git-claude\"'"
+    echo ""
+    echo "  # 全局生效（需指定绝对路径）："
+    echo "  git config --global alias.claude '!bash \"/path/to/scripts/git-claude\"'"
+}
+
+# =============================================================================
+# 参数解析
+# =============================================================================
+
+# 无参数时显示帮助并退出
+if [ $# -eq 0 ]; then
+    show_help
+    exit 1
+fi
+
+# =============================================================================
+# 子命令：list — 显示所有 worktree
+# =============================================================================
+
+cmd_list() {
+    # 获取主仓库根目录
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        die "Not a git repository. 请在 git 仓库目录下执行此命令。"
+    fi
+    local git_common_dir repo_root
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ "$git_common_dir" != ".git" ]]; then
+        repo_root=$(dirname "$git_common_dir")
+    else
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    fi
+
+    echo -e "${COLOR_BOLD}当前仓库 Worktree 列表：${COLOR_RESET}"
+    echo ""
+
+    local index=0
+    while IFS= read -r line; do
+        if [[ "$line" == worktree\ * ]]; then
+            local wt_path="${line#worktree }"
+            local wt_branch wt_head wt_bare
+            # 读取后续字段
+            IFS= read -r head_line
+            IFS= read -r branch_line
+            wt_head="${head_line#HEAD }"
+            if [[ "$branch_line" == branch\ * ]]; then
+                wt_branch="${branch_line#branch refs/heads/}"
+            elif [[ "$branch_line" == "bare" ]]; then
+                wt_branch="(bare)"
+            else
+                wt_branch="(detached HEAD)"
+            fi
+
+            index=$((index + 1))
+            if [[ "$wt_path" == "$repo_root" ]]; then
+                echo -e "  ${COLOR_BOLD}${COLOR_GREEN}[主仓库]${COLOR_RESET}  ${COLOR_BOLD}${wt_path}${COLOR_RESET}"
+            else
+                echo -e "  ${COLOR_CYAN}[worktree ${index}]${COLOR_RESET} ${wt_path}"
+            fi
+            echo -e "    分支：${COLOR_BOLD}${wt_branch}${COLOR_RESET}  HEAD：${wt_head:0:8}"
+            echo ""
+        fi
+    done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null)
+}
+
+# =============================================================================
+# 子命令：clean — 清理 worktree
+# =============================================================================
+
+cmd_clean() {
+    local target_branch="$1"
+
+    # 获取主仓库根目录
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        die "Not a git repository. 请在 git 仓库目录下执行此命令。"
+    fi
+    local git_common_dir repo_root
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ "$git_common_dir" != ".git" ]]; then
+        repo_root=$(dirname "$git_common_dir")
+    else
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    fi
+
+    # 收集所有非主仓库的 worktree 路径和分支
+    local wt_paths=() wt_branches=()
+    local current_path="" current_branch=""
+    while IFS= read -r line; do
+        if [[ "$line" == worktree\ * ]]; then
+            current_path="${line#worktree }"
+        elif [[ "$line" == branch\ * ]]; then
+            current_branch="${line#branch refs/heads/}"
+        elif [[ -z "$line" && -n "$current_path" ]]; then
+            # 空行表示一条记录结束，排除主仓库
+            if [[ "$current_path" != "$repo_root" ]]; then
+                wt_paths+=("$current_path")
+                wt_branches+=("${current_branch:-detached}")
+            fi
+            current_path=""
+            current_branch=""
+        fi
+    done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null; echo "")
+
+    if [ ${#wt_paths[@]} -eq 0 ]; then
+        info_msg "当前没有可清理的 worktree。"
+        return 0
+    fi
+
+    local target_path=""
+    local target_idx=-1
+
+    if [[ -n "$target_branch" ]]; then
+        # 指定了分支名，查找对应 worktree
+        for i in "${!wt_branches[@]}"; do
+            if [[ "${wt_branches[$i]}" == "$target_branch" ]]; then
+                target_path="${wt_paths[$i]}"
+                target_idx=$i
+                break
+            fi
+        done
+        if [[ -z "$target_path" ]]; then
+            die "未找到分支 '${target_branch}' 对应的 worktree。\n  执行 'git claude list' 查看当前所有 worktree。"
+        fi
+    else
+        # 未指定分支，交互式选择
+        echo -e "${COLOR_BOLD}请选择要清理的 worktree：${COLOR_RESET}"
+        echo ""
+        for i in "${!wt_paths[@]}"; do
+            echo -e "  ${COLOR_CYAN}[$((i+1))]${COLOR_RESET} ${wt_branches[$i]}"
+            echo "      路径：${wt_paths[$i]}"
+            echo ""
+        done
+        echo -e "  ${COLOR_YELLOW}[0]${COLOR_RESET} 取消"
+        echo ""
+        printf "请输入序号："
+        read -r choice
+        if [[ "$choice" == "0" || -z "$choice" ]]; then
+            info_msg "已取消。"
+            return 0
+        fi
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#wt_paths[@]} ]; then
+            die "无效的序号：${choice}"
+        fi
+        target_idx=$((choice - 1))
+        target_path="${wt_paths[$target_idx]}"
+        target_branch="${wt_branches[$target_idx]}"
+    fi
+
+    echo ""
+    echo -e "  ${COLOR_BOLD}分支：${COLOR_RESET}${target_branch}"
+    echo -e "  ${COLOR_BOLD}路径：${COLOR_RESET}${target_path}"
+    echo ""
+    printf "${COLOR_YELLOW}确认删除该 worktree？[y/N] ${COLOR_RESET}"
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        info_msg "已取消。"
+        return 0
+    fi
+
+    info_msg "正在移除 worktree..."
+    if ! git -C "$repo_root" worktree remove "$target_path" 2>/dev/null; then
+        # 如果有未提交的修改，提示强制删除
+        info_warn "worktree 中存在未提交的修改。"
+        printf "${COLOR_YELLOW}是否强制删除？[y/N] ${COLOR_RESET}"
+        read -r force_confirm
+        if [[ "$force_confirm" != "y" && "$force_confirm" != "Y" ]]; then
+            info_msg "已取消。"
+            return 0
+        fi
+        if ! git -C "$repo_root" worktree remove --force "$target_path"; then
+            die "强制移除 worktree 失败，请手动执行：\n  git worktree remove --force '${target_path}'"
+        fi
+    fi
+    info_success "Worktree 已移除：${target_path}"
+
+    # 询问是否同时删除本地分支
+    if [[ "$target_branch" != "detached" ]]; then
+        echo ""
+        printf "${COLOR_YELLOW}是否同时删除本地分支 '${target_branch}'？[y/N] ${COLOR_RESET}"
+        read -r del_branch
+        if [[ "$del_branch" == "y" || "$del_branch" == "Y" ]]; then
+            if git -C "$repo_root" branch -d "$target_branch" 2>/dev/null; then
+                info_success "本地分支已删除：${target_branch}"
+            elif git -C "$repo_root" branch -D "$target_branch" 2>/dev/null; then
+                info_success "本地分支已强制删除：${target_branch}"
+            else
+                info_warn "删除本地分支失败，请手动执行：git branch -d ${target_branch}"
+            fi
+        fi
+    fi
+}
+
+# =============================================================================
+# 参数解析
+# =============================================================================
+
+# 处理子命令
+case "$1" in
+    -h|--help)
+        show_help
+        exit 0
+        ;;
+    list)
+        cmd_list
+        exit 0
+        ;;
+    clean)
+        cmd_clean "${2:-}"
+        exit 0
+        ;;
+esac
+
+BRANCH_NAME="$1"
+
+# =============================================================================
+# 环境与依赖检查
+# =============================================================================
+
+# 检查是否在 git 仓库中
+check_git_repo() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        die "Not a git repository. 请在 git 仓库目录下执行此命令。"
+    fi
+    # 确保在主仓库根目录（非 worktree 子目录）中获取信息
+    local git_dir
+    git_dir=$(git rev-parse --git-dir 2>/dev/null)
+    # 如果 git_dir 不是 .git 目录而是 worktree 的 gitdir 文件，说明当前在 worktree 中
+    # 仍然允许执行，但提示用户
+    if [[ "$git_dir" != ".git" && "$git_dir" != *"/.git" ]]; then
+        info_warn "当前目录可能是一个 worktree，将基于主仓库创建新的 worktree。"
+    fi
+}
+
+# 检查 git 版本是否 >= 2.5.0
+check_git_version() {
+    if ! command -v git &>/dev/null; then
+        die "未找到 git 命令。请先安装 git：https://git-scm.com/downloads"
+    fi
+
+    local git_version
+    git_version=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$git_version"
+
+    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 5 ]; }; then
+        die "git 版本过低（当前：${git_version}，要求：>= 2.5.0）。\n  请升级 git：https://git-scm.com/downloads"
+    fi
+}
+
+# 检查 Claude Code 命令是否存在
+check_claude_installed() {
+    if ! command -v "$CLAUDE_CMD" &>/dev/null; then
+        die "未找到 ${CLAUDE_CMD} 命令。请先安装 Claude Code CLI 并设置别名：\n  npm install -g @anthropic-ai/claude-code\n  alias cc=claude\n  或参考：https://docs.anthropic.com/claude-code"
+    fi
+}
+
+info_msg "正在检查环境依赖..."
+check_git_version
+check_git_repo
+check_claude_installed
+info_success "环境检查通过"
+
+# =============================================================================
+# 分支解析：识别本地/远程分支
+# =============================================================================
+
+# 获取主仓库根目录（兼容在 worktree 中执行的情况）
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+# 如果当前在 worktree 中，需要找到主仓库根目录
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+if [[ "$GIT_COMMON_DIR" != ".git" ]]; then
+    # 在 worktree 中，git-common-dir 指向主仓库的 .git 目录
+    MAIN_REPO_ROOT=$(dirname "$GIT_COMMON_DIR")
+else
+    MAIN_REPO_ROOT="$REPO_ROOT"
+fi
+
+# 解析分支名（去掉 origin/ 前缀用于本地分支检查）
+LOCAL_BRANCH="$BRANCH_NAME"
+REMOTE_PREFIX=""
+if [[ "$BRANCH_NAME" == origin/* ]]; then
+    LOCAL_BRANCH="${BRANCH_NAME#origin/}"
+    REMOTE_PREFIX="origin/"
+fi
+
+info_msg "正在解析分支：${BRANCH_NAME}..."
+
+# 检查本地分支是否存在
+LOCAL_EXISTS=false
+if git -C "$MAIN_REPO_ROOT" branch --list "$LOCAL_BRANCH" | grep -q "$LOCAL_BRANCH"; then
+    LOCAL_EXISTS=true
+fi
+
+# 检查远程分支是否存在
+REMOTE_EXISTS=false
+if git -C "$MAIN_REPO_ROOT" ls-remote --heads origin "$LOCAL_BRANCH" 2>/dev/null | grep -q "$LOCAL_BRANCH"; then
+    REMOTE_EXISTS=true
+fi
+
+if $LOCAL_EXISTS; then
+    # 情况一：本地分支已存在，直接使用
+    info_success "找到本地分支：${LOCAL_BRANCH}"
+    FINAL_BRANCH="$LOCAL_BRANCH"
+elif $REMOTE_EXISTS; then
+    # 情况二：本地不存在，但远程同名分支存在，checkout 并建立跟踪
+    info_msg "本地分支不存在，从远程分支 origin/${LOCAL_BRANCH} checkout 并建立跟踪..."
+    if ! git -C "$MAIN_REPO_ROOT" branch --track "$LOCAL_BRANCH" "origin/$LOCAL_BRANCH" 2>/dev/null; then
+        die "checkout 远程分支失败。\n  请检查远程分支 origin/${LOCAL_BRANCH} 是否可访问，或手动执行：\n  git fetch origin && git branch --track ${LOCAL_BRANCH} origin/${LOCAL_BRANCH}"
+    fi
+    info_success "已 checkout 远程分支：${LOCAL_BRANCH} -> origin/${LOCAL_BRANCH}"
+    FINAL_BRANCH="$LOCAL_BRANCH"
+else
+    # 情况三：本地和远程均不存在，创建全新本地分支
+    info_warn "本地和远程均未找到分支 '${LOCAL_BRANCH}'，将基于当前 HEAD 创建新分支..."
+    if ! git -C "$MAIN_REPO_ROOT" branch "$LOCAL_BRANCH" 2>/dev/null; then
+        die "创建新分支失败。\n  请检查分支名 '${LOCAL_BRANCH}' 是否合法，或手动执行：\n  git branch ${LOCAL_BRANCH}"
+    fi
+    info_success "已创建新本地分支：${LOCAL_BRANCH}"
+    FINAL_BRANCH="$LOCAL_BRANCH"
+fi
+
+# =============================================================================
+# Worktree 目录路径生成
+# =============================================================================
+
+# 获取仓库名称（主仓库目录名）
+REPO_NAME=$(basename "$MAIN_REPO_ROOT")
+
+# 将分支名中的特殊字符（/ . # 空格等）替换为 -
+BRANCH_SANITIZED=$(echo "$FINAL_BRANCH" | sed 's|[/\.# ]|-|g')
+
+# 生成 worktree 目标路径（主仓库同级目录）
+PARENT_DIR=$(dirname "$MAIN_REPO_ROOT")
+WORKTREE_DIR="${PARENT_DIR}/${REPO_NAME}-${BRANCH_SANITIZED}"
+
+info_msg "Worktree 目标路径：${WORKTREE_DIR}"
+
+# =============================================================================
+# Worktree 存在性检查与创建
+# =============================================================================
+
+# 查找分支已关联的 worktree 路径（若不存在返回空）
+find_worktree_by_branch() {
+    local branch="$1"
+    local found_path=""
+    local cur_path="" cur_branch=""
+    while IFS= read -r line; do
+        if [[ "$line" == worktree\ * ]]; then
+            cur_path="${line#worktree }"
+        elif [[ "$line" == branch\ * ]]; then
+            cur_branch="${line#branch refs/heads/}"
+        elif [[ -z "$line" ]]; then
+            if [[ "$cur_branch" == "$branch" && -n "$cur_path" ]]; then
+                found_path="$cur_path"
+                break
+            fi
+            cur_path=""; cur_branch=""
+        fi
+    done < <(git -C "$MAIN_REPO_ROOT" worktree list --porcelain 2>/dev/null; echo "")
+    echo "$found_path"
+}
+
+# 检查目标路径是否已被 git worktree 管理
+is_git_worktree() {
+    local target_dir="$1"
+    git -C "$MAIN_REPO_ROOT" worktree list --porcelain 2>/dev/null \
+        | grep "^worktree " \
+        | awk '{print $2}' \
+        | grep -qF "$target_dir"
+}
+
+# 优先检查：分支是否已有关联的 worktree（无论路径是否与预期一致）
+EXISTING_WORKTREE=$(find_worktree_by_branch "$FINAL_BRANCH")
+
+if [[ -n "$EXISTING_WORKTREE" ]]; then
+    # 分支已有 worktree，检查是否就是当前目录
+    CURRENT_DIR=$(pwd -P)
+    EXISTING_REAL=$(cd "$EXISTING_WORKTREE" 2>/dev/null && pwd -P || echo "$EXISTING_WORKTREE")
+    if [[ "$CURRENT_DIR" == "$EXISTING_REAL" ]]; then
+        info_warn "当前目录已经是分支 '${FINAL_BRANCH}' 的 worktree，无需切换。"
+        echo ""
+        echo -e "  ${COLOR_BOLD}分支：${COLOR_RESET}${FINAL_BRANCH}"
+        echo -e "  ${COLOR_BOLD}路径：${COLOR_RESET}${EXISTING_WORKTREE}"
+        echo ""
+        info_msg "直接在当前目录启动 Claude Code..."
+        echo ""
+        exec "$CLAUDE_CMD"
+    else
+        info_warn "分支 '${FINAL_BRANCH}' 已关联 worktree，直接复用：${EXISTING_WORKTREE}"
+        WORKTREE_DIR="$EXISTING_WORKTREE"
+    fi
+elif [ -d "$WORKTREE_DIR" ]; then
+    if is_git_worktree "$WORKTREE_DIR"; then
+        info_warn "目标路径已是 worktree，直接复用：${WORKTREE_DIR}"
+    else
+        die "目录 '${WORKTREE_DIR}' 已存在但未被 git 管理（目录冲突）。\n  请手动处理该目录后重试：\n  rm -rf '${WORKTREE_DIR}'"
+    fi
+else
+    info_msg "正在创建 worktree..."
+    if ! git -C "$MAIN_REPO_ROOT" worktree add "$WORKTREE_DIR" "$FINAL_BRANCH" 2>&1; then
+        die "创建 worktree 失败。\n  请检查：\n  1. 目标路径 '${WORKTREE_DIR}' 是否有写入权限\n  2. 执行 'git claude list' 查看当前 worktree 状态"
+    fi
+    info_success "Worktree 创建成功：${WORKTREE_DIR}"
+fi
+# =============================================================================
+# 打印成功摘要并启动 Claude Code
+# =============================================================================
+
+echo ""
+echo -e "${COLOR_BOLD}${COLOR_GREEN}========================================${COLOR_RESET}"
+echo -e "${COLOR_BOLD}${COLOR_GREEN}  ✓ Worktree 准备就绪${COLOR_RESET}"
+echo -e "${COLOR_BOLD}${COLOR_GREEN}========================================${COLOR_RESET}"
+echo -e "  ${COLOR_BOLD}分支：${COLOR_RESET}${FINAL_BRANCH}"
+echo -e "  ${COLOR_BOLD}路径：${COLOR_RESET}${WORKTREE_DIR}"
+echo -e "${COLOR_BOLD}${COLOR_GREEN}========================================${COLOR_RESET}"
+echo ""
+info_msg "正在切换到 worktree 目录并启动 Claude Code..."
+echo ""
+
+# 切换到 worktree 目录并启动 Claude Code
+# 使用 exec 将 shell 控制权交给 Claude Code 进程
+cd "$WORKTREE_DIR" || die "无法切换到目录：${WORKTREE_DIR}"
+exec "$CLAUDE_CMD"
